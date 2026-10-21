@@ -129,6 +129,35 @@ func TestSimulateEndpointReportsContractFailureAs200(t *testing.T) {
 	assert.NotEmpty(t, result.Error)
 }
 
+func TestSimulateEndpointComparesAgainstABaseline(t *testing.T) {
+	t.Parallel()
+
+	h := newServer(t, stellartest.NewFake(t))
+
+	var result probe.SimulateResult
+	rec := do(t, h, http.MethodPost, "/v1/simulate",
+		`{"contract_id":"`+stellartest.SACContract+`","function":"decimals",`+
+			`"baseline":{"contract_id":"`+stellartest.SACContract+`","function":"decimals","cost":{"instructions":1}}}`, &result)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, result.Comparison)
+	require.Len(t, result.Comparison.Figures, 4)
+	assert.Positive(t, result.Comparison.Figures[0].Delta)
+}
+
+func TestSimulateEndpointRejectsABaselineForAnotherCall(t *testing.T) {
+	t.Parallel()
+
+	h := newServer(t, stellartest.NewFake(t))
+
+	// A baseline for a different call is bad input, not an upstream failure.
+	rec := do(t, h, http.MethodPost, "/v1/simulate",
+		`{"contract_id":"`+stellartest.SACContract+`","function":"decimals",`+
+			`"baseline":{"contract_id":"`+stellartest.WasmContract+`","function":"decimals","cost":{}}}`, nil)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestSimulateEndpointBadRequests(t *testing.T) {
 	t.Parallel()
 
@@ -236,6 +265,32 @@ func TestInspectEndpointRejectsUnknownDurability(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestInspectEndpointEstimatesTheExtendFee(t *testing.T) {
+	t.Parallel()
+
+	h := newServer(t, stellartest.NewFake(t))
+
+	var result probe.InspectResult
+	rec := do(t, h, http.MethodGet,
+		"/v1/inspect/"+stellartest.SACContract+"?estimate_extend=1000000", "", &result)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, result.ExtendEstimates, 1)
+	assert.Equal(t, "instance", result.ExtendEstimates[0].Kind)
+	assert.EqualValues(t, 1000000, result.ExtendEstimates[0].Ledgers)
+	assert.Positive(t, result.ExtendEstimates[0].ResourceFee)
+}
+
+func TestInspectEndpointRejectsABadExtendCount(t *testing.T) {
+	t.Parallel()
+
+	h := newServer(t, stellartest.NewFake(t))
+
+	rec := do(t, h, http.MethodGet,
+		"/v1/inspect/"+stellartest.SACContract+"?estimate_extend=lots", "", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestInspectEndpointInvalidContract(t *testing.T) {
 	t.Parallel()
 
@@ -298,6 +353,60 @@ func TestNoWriteRoutesExist(t *testing.T) {
 		rec := do(t, h, http.MethodPost, target, `{}`, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code, "%s should not exist", target)
 	}
+}
+
+func TestCORSAllowsConfiguredOriginAndPreflight(t *testing.T) {
+	t.Parallel()
+	p, err := probe.New(probe.Options{Client: stellartest.NewFake(t), SourceAccount: stellartest.SourceAccount})
+	require.NoError(t, err)
+	h := api.New(api.Options{Prober: p, CORSOrigins: []string{"https://dashboard.example"}}).Handler()
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/simulate", nil)
+	req.Header.Set("Origin", "https://dashboard.example")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "https://dashboard.example", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Contains(t, rec.Header().Get("Access-Control-Allow-Headers"), "Authorization")
+
+	actual := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	actual.Header.Set("Origin", "https://dashboard.example")
+	actualRec := httptest.NewRecorder()
+	h.ServeHTTP(actualRec, actual)
+	assert.Equal(t, "https://dashboard.example", actualRec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCORSRejectsUnconfiguredOrigin(t *testing.T) {
+	t.Parallel()
+	p, err := probe.New(probe.Options{Client: stellartest.NewFake(t), SourceAccount: stellartest.SourceAccount})
+	require.NoError(t, err)
+	h := api.New(api.Options{Prober: p, CORSOrigins: []string{"https://dashboard.example"}}).Handler()
+
+	req := httptest.NewRequest(http.MethodOptions, "/v1/simulate", nil)
+	req.Header.Set("Origin", "https://other.example")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
+
+	actual := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	actual.Header.Set("Origin", "https://other.example")
+	actualRec := httptest.NewRecorder()
+	h.ServeHTTP(actualRec, actual)
+	assert.Empty(t, actualRec.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCORSDisabledByDefault(t *testing.T) {
+	t.Parallel()
+	h := newServer(t, stellartest.NewFake(t))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("Origin", "https://dashboard.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
 }
 
 func TestMethodNotAllowed(t *testing.T) {

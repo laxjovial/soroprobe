@@ -226,17 +226,58 @@ restoration; it does not perform one.
 
 ## CLI reference
 
-### `soroprobe simulate <contract-id> <function> [args...]`
+### `soroprobe simulate <contract-id> <function> [args...]` or `simulate --file <calls.json>`
 
 Builds an invocation, simulates it, and reports the outcome, decoded return
 value, resource cost and ledger footprint.
 
 | Flag | Description |
 | --- | --- |
+| `--file <path>` | Simulate named calls from a JSON file (`-` reads stdin). |
 | `--report <path>` | Also write the JSON result to this file, for a CI artifact. |
+| `--baseline <path>` | Compare the cost against a saved simulation report (a previous `--json` output). |
+| `--max-increase <pct>` | Fail (exit 1) when a cost figure grows by more than this percentage. |
 
 A call the contract rejects is **not** a tool error — it exits 0 and reports
 `FAILED` with the host's error text. Use `check` if you want a non-zero exit.
+
+`simulate --file` accepts a `calls` array containing `{name, contract_id,
+function, args}` entries. Calls run sequentially; a call that cannot run is
+reported and does not prevent later calls from running. Text output includes
+the name, success, a truncated return value, instructions and fee; `--json`
+returns the complete results. Unknown JSON fields are rejected.
+
+**Cost against a baseline.** Absolute cost budgets need someone to pick
+numbers. Often the useful question is relative: did this change make the call
+more expensive than it was on `main`? Save a report and compare against it:
+
+```
+$ soroprobe simulate CDLZ… transfer … --json > baseline.json
+$ soroprobe simulate CDLZ… transfer … --baseline baseline.json
+…
+cost compared to the baseline
+  cpu instructions       127569 -> 131072  (+3503, +2.7%)
+  disk read bytes        0 -> 0            (+0, n/a)
+  write bytes            0 -> 0            (+0, n/a)
+  resource fee (stroops) 12279 -> 13000    (+721, +5.9%)
+```
+
+The baseline must be for the **same contract and function**; a report for a
+different call is rejected rather than compared, because its costs describe a
+call that was never made.
+
+`--max-increase` turns the comparison into a gate. The command exits **1** when
+any cost figure grows by more than the threshold, which is what a CI job wants:
+
+```
+$ soroprobe simulate CDLZ… transfer … --baseline baseline.json --max-increase 10%
+error: the cost grew by more than 10%
+```
+
+The percentage sign is optional, so `10` and `10%` mean the same thing. A
+figure that grew from a baseline of zero has no percentage to compare
+against, so it counts as an increase however large the threshold is: from
+nothing to something is not a small change.
 
 ### `soroprobe inspect <contract-id>`
 
@@ -247,6 +288,7 @@ Reads the contract's instance and code entries and reports expiration health.
 | `--key <spec>` | A contract data key to inspect, in `type:value` form. Repeatable. |
 | `--key-file <path>` | A file listing data keys, one spec per line. Blank lines and `#` comment lines are ignored. |
 | `--durability <d>` | Durability for `--key` lookups: `persistent` (default) or `temporary`. |
+| `--estimate-extend <ledgers>` | Also price extending each reported entry's TTL by this many ledgers. |
 | `--report <path>` | Also write the JSON result to this file, for a CI artifact. |
 
 Stellar RPC reads ledger entries **by key** and offers no way to enumerate the
@@ -271,6 +313,36 @@ $ soroprobe inspect C… --key-file keys.txt
 Keys from the file and from `--key` are combined, duplicates dropped, and an
 invalid line fails immediately — reported with its line number, before any
 request is sent.
+
+**What keeping it alive costs.** Knowing an entry expires in two days is half
+the answer; the other half is what keeping it alive costs. `--estimate-extend`
+simulates an extension of each reported entry and reports the fee:
+
+```
+$ soroprobe inspect CDLZ… --estimate-extend 1209600
+contract CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+
+executable stellar_asset
+
+state entries
+  instance   OK       healthy
+             live for 1012931 more ledgers (~58.7 days, until ledger 5027056)
+  code       n/a  built into the host, no code entry
+
+cost to extend (simulated; nothing is submitted)
+  instance               6128 stroops (0.0006128 XLM)  to ledger 5223725, 1209600 ledgers
+
+overall OK       healthy
+```
+
+The extension is only ever **simulated** — nothing is submitted, and the
+placeholder source account is enough. Each entry is priced on its own, with a
+footprint holding that entry alone, so the fee is the fee for the entry you
+are looking at.
+
+An entry that **cannot** be extended says so instead of quoting a price: a
+missing entry has nothing to extend, and an expired one must be restored
+before it can be extended.
 
 ### `soroprobe check <contract-id>`
 
@@ -310,7 +382,7 @@ on the run summary instead of burying it in the log:
 `--json` suppresses annotations, since its consumer parses the document.
 
 **Checking many contracts at once.** `--file` runs every check listed in a
-JSON file (`-` reads stdin), so one CI step can cover a whole deployment:
+JSON or YAML file (`-` reads stdin), so one CI step can cover a whole deployment:
 
 ```json
 {"checks": [
@@ -330,9 +402,11 @@ result 1 passed, 1 failed, 0 could not run
 Each entry takes `name` (defaults to the contract ID, and must be unique),
 `contract_id`, `function`, `args`, `data_keys`, `data_durability` and `timeout`.
 Unknown keys are rejected, so a typo cannot silently drop a step. Checks run one
-after another, to stay inside public RPC rate limits; one that cannot run is
-reported and the rest continue. The exit code is 2 if any check could not run,
-else 1 if any failed, else 0.
+at a time by default to stay inside public RPC rate limits; `--concurrency N`
+runs up to N checks at once for endpoints that allow it. Results remain in file
+order, and cancellation stops checks waiting to start. One check that cannot run
+is reported and the rest continue. The exit code is 2 if any check could not
+run, else 1 if any failed, else 0.
 
 `timeout` bounds a single check, as a Go duration string (`"45s"`); a check that
 outlives it is reported as one that could not run, and the batch continues.
@@ -382,7 +456,7 @@ soroprobe simulate CDLZ... transfer \
 | `void`, `null` | `void` |
 | `u32`, `i32` | `u32:5`, `i32:-5` |
 | `u64`, `i64` | `u64:100` |
-| `u128`, `i128` | `i128:-10000000` |
+| `u128`, `i128` | `i128:-10000000`, `i128:10.5@7` |
 | `u256`, `i256` | `u256:12345` |
 | `timepoint`, `duration` | `timepoint:1700000000` |
 | `sym`, `symbol` | `sym:transfer` |
@@ -391,6 +465,34 @@ soroprobe simulate CDLZ... transfer \
 | `addr`, `address` | `addr:GABC...`, `addr:CDEF...` |
 | `vec` | `vec:["u32:1","u32:2"]`, `vec:[1, 2]` |
 | `map` | `map:[["sym:a","u32:1"],["sym:b","u32:2"]]` |
+
+### Token amounts
+
+Token functions take amounts in **base units**, so 10 XLM-equivalent of a
+7-decimal token is `100000000`, and miscounting the zeros sends the wrong
+amount to a simulation. An integer argument can carry a decimal scale, written
+as an `@` followed by the token's decimal count:
+
+```bash
+soroprobe simulate CDLZ... transfer addr:GABC... addr:CDEF... i128:10.5@7
+```
+
+| Argument | Means | Encoded as |
+| --- | --- | --- |
+| `i128:10.5@7` | 10.5 tokens of a 7-decimal token | `105000000` |
+| `i128:10@7` | 10 tokens of a 7-decimal token | `100000000` |
+| `i128:-2.5@7` | minus 2.5 tokens | `-25000000` |
+| `i128:0.0000001@7` | one base unit | `1` |
+| `i128:10000000` | 10000000 base units, unscaled | `10000000` |
+
+The conversion is **exact**: the integer and fractional parts are scaled with
+integer arithmetic, never with floating point, so no amount is ever off by a
+rounding error. An amount with more fractional digits than the token has
+decimals — `i128:10.12345@2` — is **rejected** rather than rounded, because a
+rounded amount is a different amount. Negative amounts and zero work.
+
+The scale is part of the argument, so it needs a type prefix: a bare `10.5@7`
+is not an amount, it is a string.
 
 **Collections** are written as JSON, the one nesting syntax that survives a
 shell intact — quote the whole argument:
@@ -477,6 +579,10 @@ soroprobe serve --addr 0.0.0.0:8080      # or HTTP_ADDR=0.0.0.0:8080
 The Docker image sets `HTTP_ADDR=:8080` itself, since loopback inside a
 container would reach nothing.
 
+Set `CORS_ORIGINS` to a comma-separated list of exact browser origins, such as
+`https://dashboard.example,https://admin.example`, to enable CORS. Unset means
+no CORS headers. Preflight requests are answered only for listed origins.
+
 ### `GET /healthz`
 
 Liveness. Deliberately does **not** call out to the network, so the probe does
@@ -496,9 +602,28 @@ curl -s localhost:8080/v1/simulate -d '{
 }' | jq
 ```
 
+Optional `baseline` and `max_increase_percent` compare the cost against a saved
+report, exactly as `simulate --baseline` does. The baseline has the shape of a
+`--json` report:
+
+```bash
+curl -s localhost:8080/v1/simulate -d '{
+  "contract_id": "CDLZ…",
+  "function": "decimals",
+  "baseline": {"contract_id": "CDLZ…", "function": "decimals", "cost": {"instructions": 127569}},
+  "max_increase_percent": 10
+}' | jq
+```
+
+A baseline for a different contract or function is a **400**: it describes a
+call that was never made.
+
 ### `GET /v1/inspect/{contract}`
 
-Query parameters: `key` (repeatable), `durability`.
+Query parameters: `key` (repeatable), `durability`, `estimate_extend`.
+
+`estimate_extend` prices the extension of each reported entry's TTL by that
+many ledgers, exactly as `inspect --estimate-extend` does.
 
 ### `GET /v1/check/{contract}`
 
@@ -544,6 +669,7 @@ Precedence, lowest to highest: **defaults → top-level config file keys → pro
 | `NETWORK_PASSPHRASE` | `--network-passphrase` | `Test SDF Network ; September 2015` |
 | `SOURCE_ACCOUNT` | `--source-account` | all-zero placeholder |
 | `HTTP_ADDR` | `--addr` (on `serve`) | `127.0.0.1:8080` |
+| `CORS_ORIGINS` | — | unset; no CORS headers |
 | `LOG_LEVEL` | `--log-level` | `info` |
 | `RPC_TIMEOUT` | `--timeout` | `30s` |
 | `WARN_LEDGERS` | `--warn-ledgers` | `120960` (≈7 days) |

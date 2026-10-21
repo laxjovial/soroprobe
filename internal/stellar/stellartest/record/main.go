@@ -144,6 +144,16 @@ func run(rpcURL, outDir, sac, wasm, undeployed, source string) error {
 		fmt.Printf("recorded %s (error=%q)\n", c.name, truncate(resp.Error, 40))
 	}
 
+	// The extension simulation: what extending an entry's TTL would cost.
+	extendResp, err := simulateExtend(ctx, client, source, sac)
+	if err != nil {
+		return err
+	}
+	if err := write(outDir, "simulate_extend.json", extendResp); err != nil {
+		return err
+	}
+	fmt.Printf("recorded simulate_extend.json (error=%q)\n", truncate(extendResp.Error, 40))
+
 	return nil
 }
 
@@ -201,80 +211,28 @@ func simulate(ctx context.Context, c *rpcclient.Client, source, contractID, fn s
 	return c.SimulateTransaction(ctx, protocol.SimulateTransactionRequest{Transaction: envelope})
 }
 
-func recordCustom(rpcURL, outPath, source, contractID, fn string, argSpecs, keySpecs []string) error {
-	ctx := context.Background()
-	client := rpcclient.NewClient(rpcURL, &http.Client{Timeout: 30 * time.Second})
-	defer func() { _ = client.Close() }()
-
+// simulateExtend records the cost of extending a contract's instance entry,
+// which is the transaction SoroProbe simulates to price a TTL extension.
+func simulateExtend(ctx context.Context, c *rpcclient.Client, source, contractID string) (protocol.SimulateTransactionResponse, error) {
 	addr, err := stellar.ParseContractID(contractID)
 	if err != nil {
-		return fmt.Errorf("parse contract id %s: %w", contractID, err)
+		return protocol.SimulateTransactionResponse{}, err
 	}
 
-	codec := scval.NewRegistry()
-
-	// If --fn is specified, record a simulation fixture.
-	if fn != "" {
-		encodedArgs := make([]xdr.ScVal, 0, len(argSpecs))
-		for _, argSpec := range argSpecs {
-			val, err := codec.Encode(argSpec)
-			if err != nil {
-				return fmt.Errorf("encode arg %q: %w", argSpec, err)
-			}
-			encodedArgs = append(encodedArgs, val)
-		}
-
-		resp, err := simulate(ctx, client, source, contractID, fn, encodedArgs...)
-		if err != nil {
-			return fmt.Errorf("simulate %s:%s: %w", contractID, fn, err)
-		}
-
-		dest := outPath
-		if dest == "" {
-			dest = fmt.Sprintf("simulate_%s.json", fn)
-		}
-		if err := writeToFile(dest, resp); err != nil {
-			return err
-		}
-		fmt.Printf("recorded simulation to %s (error=%q)\n", dest, truncate(resp.Error, 40))
-		return nil
-	}
-
-	// Otherwise, record ledger entries (instance, code if wasm, and any specified data keys).
-	var encodedKeys []string
-	instKey, err := stellar.EncodeKey(stellar.InstanceKey(addr))
+	latest, err := c.GetLatestLedger(ctx)
 	if err != nil {
-		return err
-	}
-	encodedKeys = append(encodedKeys, instKey)
-
-	for _, kSpec := range keySpecs {
-		val, err := codec.Encode(kSpec)
-		if err != nil {
-			return fmt.Errorf("encode data key %q: %w", kSpec, err)
-		}
-		// Record persistent data key by default.
-		dk, err := stellar.EncodeKey(stellar.DataKey(addr, val, xdr.ContractDataDurabilityPersistent))
-		if err != nil {
-			return err
-		}
-		encodedKeys = append(encodedKeys, dk)
+		return protocol.SimulateTransactionResponse{}, err
 	}
 
-	resp, err := client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: encodedKeys})
+	envelope, err := stellar.BuildExtendFootprintTx(stellar.ExtendParams{
+		SourceAccount: source,
+		Key:           stellar.InstanceKey(addr),
+		ExtendTo:      latest.Sequence + 1_000_000,
+	})
 	if err != nil {
-		return fmt.Errorf("getLedgerEntries: %w", err)
+		return protocol.SimulateTransactionResponse{}, err
 	}
-
-	dest := outPath
-	if dest == "" {
-		dest = fmt.Sprintf("ledger_entries_%s.json", contractID[:8])
-	}
-	if err := writeToFile(dest, resp); err != nil {
-		return err
-	}
-	fmt.Printf("recorded %d ledger entries to %s\n", len(resp.Entries), dest)
-	return nil
+	return c.SimulateTransaction(ctx, protocol.SimulateTransactionRequest{Transaction: envelope})
 }
 
 func write(dir, name string, v any) error {

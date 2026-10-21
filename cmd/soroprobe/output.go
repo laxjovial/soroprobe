@@ -155,6 +155,10 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 		}
 	}
 
+	if r.Comparison != nil {
+		renderCostComparison(bw, s, r.Comparison)
+	}
+
 	if r.RestoreRequired != nil {
 		bw.printf("\n%s\n", s.red("RESTORE REQUIRED"))
 		bw.printf("  This call touches archived entries. They must be restored before it\n")
@@ -167,6 +171,61 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 
 	bw.printf("\n%s\n", s.dim(fmt.Sprintf("simulated against ledger %d", r.LatestLedger)))
 	return bw.err
+}
+
+// renderCostComparison prints each cost figure with its change against the
+// baseline, in absolute and percentage terms.
+//
+// The percentage is omitted rather than guessed at when the baseline figure
+// was zero: there is no percentage change from nothing, and inventing one
+// would make an increase look smaller than it is.
+func renderCostComparison(bw *bufWriter, s styler, c *probe.CostComparison) {
+	bw.printf("\n%s\n", s.bold("cost compared to the baseline"))
+	for _, f := range c.Figures {
+		percent := "n/a"
+		if f.Percent != nil {
+			percent = fmt.Sprintf("%+.1f%%", *f.Percent)
+		}
+		bw.printf("  %-22s %d -> %d  (%+d, %s)\n", f.Name, f.Baseline, f.Current, f.Delta, percent)
+	}
+	if c.Exceeded && c.MaxIncreasePercent != nil {
+		bw.printf("  %s\n", s.red(fmt.Sprintf(
+			"a cost figure grew by more than %s", formatPercent(*c.MaxIncreasePercent))))
+	}
+}
+
+func renderSimulateBatch(w io.Writer, r *probe.SimulateBatchResult) error {
+	bw := &bufWriter{w: w}
+	bw.printf("%-24s %-8s %-48s %-14s %s\n", "NAME", "SUCCESS", "RETURN VALUE", "INSTRUCTIONS", "FEE")
+	for _, item := range r.Items {
+		if item.Error != "" {
+			bw.printf("%-24s %-8s %-48s %-14s %s\n", truncate(item.Name, 24), "error", truncate(item.Error, 48), "-", "-")
+			continue
+		}
+		value := item.Result.Error
+		if item.Result.ReturnValue != nil {
+			encoded, err := json.Marshal(item.Result.ReturnValue)
+			if err != nil {
+				return err
+			}
+			value = string(encoded)
+		}
+		if value == "" {
+			value = "(void)"
+		}
+		bw.printf("%-24s %-8t %-48s %-14d %s\n",
+			truncate(item.Name, 24), item.Result.Success, truncate(value, 48),
+			item.Result.Cost.Instructions, stroops(item.Result.Cost.ResourceFee))
+	}
+	return bw.err
+}
+
+func truncate(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit-3]) + "..."
 }
 
 // indent prefixes every line of s, so multi-line RPC errors stay aligned.
@@ -215,9 +274,34 @@ func renderInspect(w io.Writer, r *probe.InspectResult) error {
 		bw.printf("  %s\n", string(encoded))
 	}
 
+	if len(r.ExtendEstimates) > 0 {
+		renderExtendEstimates(bw, s, r.ExtendEstimates)
+	}
+
 	bw.printf("\n%s %s\n", s.bold("overall"), s.status(r.Status))
 	bw.printf("%s\n", s.dim(fmt.Sprintf("checked at ledger %d", r.LatestLedger)))
 	return bw.err
+}
+
+// renderExtendEstimates prints what it would cost to keep each entry alive.
+//
+// An entry that cannot be extended says so instead of quoting a price: a
+// number for an entry that is not there would be worse than no number.
+func renderExtendEstimates(bw *bufWriter, s styler, estimates []probe.ExtendEstimate) {
+	bw.printf("\n%s %s\n", s.bold("cost to extend"), s.dim("(simulated; nothing is submitted)"))
+	for _, e := range estimates {
+		label := e.Kind
+		if e.Key != "" {
+			label = e.Kind + " " + e.Key
+		}
+		if e.Note != "" {
+			bw.printf("  %-22s %s\n", label, s.dim(e.Note))
+			continue
+		}
+		bw.printf("  %-22s %s  %s\n", label,
+			stroops(e.ResourceFee),
+			s.dim(fmt.Sprintf("to ledger %d, %d ledgers", e.ExtendTo, e.Ledgers)))
+	}
 }
 
 func renderEntry(bw *bufWriter, s styler, label string, e probe.EntryReport) {

@@ -15,6 +15,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
@@ -38,11 +39,9 @@ const (
 	UndeployedContract = "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW"
 	// SourceAccount is the placeholder public key used to build transactions.
 	SourceAccount = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
-
-	// PersistentDataKey is a real persistent contract data key recorded on SACContract (balance entry).
-	PersistentDataKey = `vec:["sym:Balance","addr:CBXZBQ6NW3TGPGLTR4JCG2VPVWFLCCHKDW75NJIXYXV7CJLNUO64VTFC"]`
-	// TemporaryDataKey is a real temporary contract data key recorded on SACContract (allowance entry).
-	TemporaryDataKey = `vec:["sym:Allowance","map:[[\"sym:from\",\"addr:GB32JP5GNOQLW4NUMV6H2UBOSMB4DROL7YNDBWAHYXMVFLLJOH3LXKHK\"],[\"sym:spender\",\"addr:CA6P26K4QNNIMTYP22ILTSCXQQDEKNWJIZJPC34YEZYOLBNT7YUPX7XS\"]]"]`
+	// ExtendFootprintTTL is the subject name of a transaction that extends
+	// the TTL of a ledger entry rather than invoking a contract function.
+	ExtendFootprintTTL = "extend_footprint_ttl"
 )
 
 // Load decodes a fixture file into v.
@@ -85,6 +84,8 @@ func LoadLatestLedger(t testing.TB) protocol.GetLatestLedgerResponse {
 //
 // The zero value is usable but returns nothing; prefer NewFake.
 type Fake struct {
+	mu sync.Mutex
+
 	// Entries maps a base64 LedgerKey to the entry stored at it. Keys absent
 	// from the map are reported as not found, exactly as RPC does.
 	Entries map[string]protocol.LedgerEntryResult
@@ -139,21 +140,26 @@ func NewFake(t testing.TB) *Fake {
 
 	f.Simulations["decimals"] = LoadSimulate(t, "simulate_success.json")
 	f.Simulations["no_such_fn"] = LoadSimulate(t, "simulate_failure.json")
+	f.Simulations[ExtendFootprintTTL] = LoadSimulate(t, "simulate_extend.json")
 	return f
 }
 
 // SimulateTransaction implements stellar.Client.
 func (f *Fake) SimulateTransaction(_ context.Context, req protocol.SimulateTransactionRequest) (protocol.SimulateTransactionResponse, error) {
+	f.mu.Lock()
 	f.SimulateRequests = append(f.SimulateRequests, req)
+	f.mu.Unlock()
 	if f.SimulateErr != nil {
 		return protocol.SimulateTransactionResponse{}, f.SimulateErr
 	}
 
-	fn, err := FunctionOf(req.Transaction)
+	fn, err := SubjectOf(req.Transaction)
 	if err != nil {
 		return protocol.SimulateTransactionResponse{}, err
 	}
+	f.mu.Lock()
 	f.Functions = append(f.Functions, fn)
+	f.mu.Unlock()
 
 	resp, ok := f.Simulations[fn]
 	if !ok {
@@ -167,7 +173,9 @@ func (f *Fake) SimulateTransaction(_ context.Context, req protocol.SimulateTrans
 
 // GetLedgerEntries implements stellar.Client.
 func (f *Fake) GetLedgerEntries(_ context.Context, req protocol.GetLedgerEntriesRequest) (protocol.GetLedgerEntriesResponse, error) {
+	f.mu.Lock()
 	f.EntryRequests = append(f.EntryRequests, req.Keys)
+	f.mu.Unlock()
 	if f.EntriesErr != nil {
 		return protocol.GetLedgerEntriesResponse{}, f.EntriesErr
 	}
@@ -226,9 +234,10 @@ func InstanceKeyOf(t testing.TB, contractID string) string {
 	return key
 }
 
-// FunctionOf decodes a base64 transaction envelope and returns the name of the
-// contract function it invokes.
-func FunctionOf(envelope string) (string, error) {
+// SubjectOf decodes a base64 transaction envelope and returns the name of
+// what it does: the contract function it invokes, or ExtendFootprintTTL for
+// an extension.
+func SubjectOf(envelope string) (string, error) {
 	var env xdr.TransactionEnvelope
 	if err := xdr.SafeUnmarshalBase64(envelope, &env); err != nil {
 		return "", fmt.Errorf("decode envelope: %w", err)
@@ -238,9 +247,14 @@ func FunctionOf(envelope string) (string, error) {
 	if len(ops) != 1 {
 		return "", fmt.Errorf("expected exactly 1 operation, got %d", len(ops))
 	}
+
+	if _, ok := ops[0].Body.GetExtendFootprintTtlOp(); ok {
+		return ExtendFootprintTTL, nil
+	}
+
 	invoke, ok := ops[0].Body.GetInvokeHostFunctionOp()
 	if !ok {
-		return "", fmt.Errorf("operation is not invokeHostFunction")
+		return "", fmt.Errorf("operation is neither invokeHostFunction nor extendFootprintTtl")
 	}
 	args, ok := invoke.HostFunction.GetInvokeContract()
 	if !ok {
