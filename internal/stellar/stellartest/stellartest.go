@@ -38,6 +38,11 @@ const (
 	UndeployedContract = "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW"
 	// SourceAccount is the placeholder public key used to build transactions.
 	SourceAccount = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+
+	// PersistentDataKey is a real persistent contract data key recorded on SACContract (balance entry).
+	PersistentDataKey = `vec:["sym:Balance","addr:CBXZBQ6NW3TGPGLTR4JCG2VPVWFLCCHKDW75NJIXYXV7CJLNUO64VTFC"]`
+	// TemporaryDataKey is a real temporary contract data key recorded on SACContract (allowance entry).
+	TemporaryDataKey = `vec:["sym:Allowance","map:[[\"sym:from\",\"addr:GB32JP5GNOQLW4NUMV6H2UBOSMB4DROL7YNDBWAHYXMVFLLJOH3LXKHK\"],[\"sym:spender\",\"addr:CA6P26K4QNNIMTYP22ILTSCXQQDEKNWJIZJPC34YEZYOLBNT7YUPX7XS\"]]"]`
 )
 
 // Load decodes a fixture file into v.
@@ -120,6 +125,7 @@ func NewFake(t testing.TB) *Fake {
 		"ledger_entries_sac_instance.json",
 		"ledger_entries_wasm_instance.json",
 		"ledger_entries_wasm_code.json",
+		"ledger_entries_data_durability.json",
 	} {
 		resp := LoadLedgerEntries(t, name)
 		for _, entry := range resp.Entries {
