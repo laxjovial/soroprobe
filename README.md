@@ -363,7 +363,7 @@ Runs the HTTP API. It binds `127.0.0.1:8080` by default; `--addr` overrides
 
 ### Global flags
 
-`--json`, `--config`, `--rpc-url`, `--network-passphrase`, `--source-account`,
+`--json`, `--config`, `--profile`, `--rpc-url`, `--network-passphrase`, `--source-account`,
 `--log-level`, `--timeout`, `--warn-ledgers`, `--critical-ledgers`,
 `--sorovault-url`.
 
@@ -536,7 +536,7 @@ live on-chain state, and a cached health result would be worse than no result.
 
 ## Configuration
 
-Precedence, lowest to highest: **defaults → config file → environment → flags**.
+Precedence, lowest to highest: **defaults → top-level config file keys → profile → environment → flags**.
 
 | Environment variable | Flag | Default |
 | --- | --- | --- |
@@ -550,6 +550,7 @@ Precedence, lowest to highest: **defaults → config file → environment → fl
 | `CRITICAL_LEDGERS` | `--critical-ledgers` | `17280` (≈1 day) |
 | `SOROVAULT_URL` | `--sorovault-url` | unset — [type arguments from SoroVault](#typing-arguments-from-sorovault) |
 | `SOROPROBE_CONFIG` | `--config` | `./soroprobe.json` (then `./soroprobe.yaml`, `./soroprobe.yml`) if present |
+| `SOROPROBE_PROFILE` | `--profile` | unset |
 
 [.env.example](.env.example) documents every variable. SoroProbe reads the
 **environment**, not `.env` itself, so load it yourself:
@@ -561,13 +562,25 @@ docker run --env-file .env soroprobe check <contract>
 
 A config file, by contrast, is read directly. JSON and YAML formats (`soroprobe.json`, `soroprobe.yaml`, `soroprobe.yml`) are supported, with snake_case keys (unknown keys are rejected in both formats). When no path is specified, SoroProbe looks for `soroprobe.json`, then `soroprobe.yaml`, and finally `soroprobe.yml`.
 
+### Profiles
+
+Config files can define named `profiles` for different networks (such as `testnet`, `mainnet`, or `local`). Select a profile using `--profile <name>` or the `SOROPROBE_PROFILE` environment variable. An unknown profile name produces an error listing the available profiles.
+
 In JSON:
 
 ```json
 {
   "rpc_url": "https://soroban-testnet.stellar.org",
   "warn_ledgers": 120960,
-  "critical_ledgers": 17280
+  "critical_ledgers": 17280,
+  "profiles": {
+    "mainnet": {
+      "rpc_url": "https://rpc.mainnet.stellar.org",
+      "network_passphrase": "Public Global Stellar Network ; September 2015",
+      "warn_ledgers": 172800,
+      "critical_ledgers": 34560
+    }
+  }
 }
 ```
 
@@ -578,6 +591,13 @@ Or in YAML:
 rpc_url: https://soroban-testnet.stellar.org
 warn_ledgers: 120960
 critical_ledgers: 17280
+
+profiles:
+  mainnet:
+    rpc_url: https://rpc.mainnet.stellar.org
+    network_passphrase: "Public Global Stellar Network ; September 2015"
+    warn_ledgers: 172800
+    critical_ledgers: 34560
 ```
 
 ## Why no secret key

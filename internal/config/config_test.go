@@ -199,6 +199,110 @@ func TestLoadRejectsUnknownKeys(t *testing.T) {
 	})
 }
 
+func TestProfilePrecedenceAndResolution(t *testing.T) {
+	configContent := `{
+		"rpc_url": "https://top.example.com",
+		"network_passphrase": "Top Network",
+		"http_addr": ":8081",
+		"log_level": "info",
+		"timeout": "10s",
+		"warn_ledgers": 100,
+		"critical_ledgers": 10,
+		"profiles": {
+			"mainnet": {
+				"rpc_url": "https://mainnet.example.com",
+				"network_passphrase": "Public Global Stellar Network ; September 2015",
+				"warn_ledgers": 200,
+				"critical_ledgers": 20
+			},
+			"testnet": {
+				"rpc_url": "https://testnet.example.com"
+			}
+		}
+	}`
+
+	t.Run("profile overrides top-level file keys and defaults", func(t *testing.T) {
+		path := writeConfigFile(t, "soroprobe.json", configContent)
+		cfg, err := config.LoadWithProfile(path, "mainnet")
+		require.NoError(t, err)
+
+		// Profile overrides
+		assert.Equal(t, "https://mainnet.example.com", cfg.RPCURL)
+		assert.Equal(t, "Public Global Stellar Network ; September 2015", cfg.NetworkPassphrase)
+		assert.EqualValues(t, 200, cfg.WarnLedgers)
+		assert.EqualValues(t, 20, cfg.CriticalLedgers)
+
+		// Top-level file keys inherited when not overridden by profile
+		assert.Equal(t, ":8081", cfg.HTTPAddr)
+		assert.Equal(t, "info", cfg.LogLevel)
+		assert.Equal(t, 10*time.Second, cfg.Timeout)
+
+		// Defaults inherited when absent from both top-level and profile
+		assert.Equal(t, config.DefaultSourceAccount, cfg.SourceAccount)
+	})
+
+	t.Run("env overrides profile", func(t *testing.T) {
+		path := writeConfigFile(t, "soroprobe.json", configContent)
+		t.Setenv(config.EnvRPCURL, "https://env.example.com")
+		t.Setenv(config.EnvWarnLedgers, "300")
+
+		cfg, err := config.LoadWithProfile(path, "mainnet")
+		require.NoError(t, err)
+
+		// Environment wins over profile
+		assert.Equal(t, "https://env.example.com", cfg.RPCURL)
+		assert.EqualValues(t, 300, cfg.WarnLedgers)
+
+		// Profile keys not set in env remain
+		assert.Equal(t, "Public Global Stellar Network ; September 2015", cfg.NetworkPassphrase)
+		assert.EqualValues(t, 20, cfg.CriticalLedgers)
+	})
+
+	t.Run("profile selected via SOROPROBE_PROFILE", func(t *testing.T) {
+		path := writeConfigFile(t, "soroprobe.json", configContent)
+		t.Setenv(config.EnvProfile, "mainnet")
+
+		cfg, err := config.Load(path)
+		require.NoError(t, err)
+		assert.Equal(t, "https://mainnet.example.com", cfg.RPCURL)
+		assert.Equal(t, "Public Global Stellar Network ; September 2015", cfg.NetworkPassphrase)
+	})
+
+	t.Run("YAML profile support", func(t *testing.T) {
+		yamlContent := `
+rpc_url: https://top-yaml.example.com
+warn_ledgers: 100
+critical_ledgers: 10
+profiles:
+  custom:
+    rpc_url: https://custom-yaml.example.com
+    warn_ledgers: 500
+`
+		path := writeConfigFile(t, "soroprobe.yaml", yamlContent)
+		cfg, err := config.LoadWithProfile(path, "custom")
+		require.NoError(t, err)
+		assert.Equal(t, "https://custom-yaml.example.com", cfg.RPCURL)
+		assert.EqualValues(t, 500, cfg.WarnLedgers)
+		assert.EqualValues(t, 10, cfg.CriticalLedgers)
+	})
+
+	t.Run("unknown profile lists defined profiles", func(t *testing.T) {
+		path := writeConfigFile(t, "soroprobe.json", configContent)
+		_, err := config.LoadWithProfile(path, "unknown")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown profile "unknown"`)
+		assert.Contains(t, err.Error(), "mainnet, testnet")
+	})
+
+	t.Run("unknown profile when no profiles defined", func(t *testing.T) {
+		path := writeConfigFile(t, "soroprobe.json", `{"rpc_url":"https://example.com"}`)
+		_, err := config.LoadWithProfile(path, "missing")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown profile "missing"`)
+		assert.Contains(t, err.Error(), "no profiles defined")
+	})
+}
+
 func TestLoadFileFoundViaEnvVar(t *testing.T) {
 	path := writeConfig(t, `{"rpc_url":"https://from-env-file.example.com"}`)
 	t.Setenv(config.EnvConfigFile, path)
