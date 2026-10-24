@@ -76,7 +76,7 @@ func main() {
 }
 
 func run(rpcURL, outDir, sac, wasm, undeployed, source string) error {
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return err
 	}
 	ctx := context.Background()
@@ -211,6 +211,82 @@ func simulate(ctx context.Context, c *rpcclient.Client, source, contractID, fn s
 	return c.SimulateTransaction(ctx, protocol.SimulateTransactionRequest{Transaction: envelope})
 }
 
+func recordCustom(rpcURL, outPath, source, contractID, fn string, argSpecs, keySpecs []string) error {
+	ctx := context.Background()
+	client := rpcclient.NewClient(rpcURL, &http.Client{Timeout: 30 * time.Second})
+	defer func() { _ = client.Close() }()
+
+	addr, err := stellar.ParseContractID(contractID)
+	if err != nil {
+		return fmt.Errorf("parse contract id %s: %w", contractID, err)
+	}
+
+	codec := scval.NewRegistry()
+
+	// If --fn is specified, record a simulation fixture.
+	if fn != "" {
+		encodedArgs := make([]xdr.ScVal, 0, len(argSpecs))
+		for _, argSpec := range argSpecs {
+			val, err := codec.Encode(argSpec)
+			if err != nil {
+				return fmt.Errorf("encode arg %q: %w", argSpec, err)
+			}
+			encodedArgs = append(encodedArgs, val)
+		}
+
+		resp, err := simulate(ctx, client, source, contractID, fn, encodedArgs...)
+		if err != nil {
+			return fmt.Errorf("simulate %s:%s: %w", contractID, fn, err)
+		}
+
+		dest := outPath
+		if dest == "" {
+			dest = fmt.Sprintf("simulate_%s.json", fn)
+		}
+		if err := writeToFile(dest, resp); err != nil {
+			return err
+		}
+		fmt.Printf("recorded simulation to %s (error=%q)\n", dest, truncate(resp.Error, 40))
+		return nil
+	}
+
+	// Otherwise, record ledger entries (instance, code if wasm, and any specified data keys).
+	var encodedKeys []string
+	instKey, err := stellar.EncodeKey(stellar.InstanceKey(addr))
+	if err != nil {
+		return err
+	}
+	encodedKeys = append(encodedKeys, instKey)
+
+	for _, kSpec := range keySpecs {
+		val, err := codec.Encode(kSpec)
+		if err != nil {
+			return fmt.Errorf("encode data key %q: %w", kSpec, err)
+		}
+		// Record persistent data key by default.
+		dk, err := stellar.EncodeKey(stellar.DataKey(addr, val, xdr.ContractDataDurabilityPersistent))
+		if err != nil {
+			return err
+		}
+		encodedKeys = append(encodedKeys, dk)
+	}
+
+	resp, err := client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: encodedKeys})
+	if err != nil {
+		return fmt.Errorf("getLedgerEntries: %w", err)
+	}
+
+	dest := outPath
+	if dest == "" {
+		dest = fmt.Sprintf("ledger_entries_%s.json", contractID[:8])
+	}
+	if err := writeToFile(dest, resp); err != nil {
+		return err
+	}
+	fmt.Printf("recorded %d ledger entries to %s\n", len(resp.Entries), dest)
+	return nil
+}
+
 // simulateExtend records the cost of extending a contract's instance entry,
 // which is the transaction SoroProbe simulates to price a TTL extension.
 func simulateExtend(ctx context.Context, c *rpcclient.Client, source, contractID string) (protocol.SimulateTransactionResponse, error) {
@@ -241,7 +317,7 @@ func write(dir, name string, v any) error {
 
 func writeToFile(path string, v any) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return err
 		}
 	}
@@ -250,7 +326,7 @@ func writeToFile(path string, v any) error {
 		return fmt.Errorf("marshal %s: %w", path, err)
 	}
 	raw = append(raw, '\n')
-	return os.WriteFile(path, raw, 0o644)
+	return os.WriteFile(path, raw, 0o600)
 }
 
 func truncate(s string, n int) string {

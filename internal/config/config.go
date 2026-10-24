@@ -22,7 +22,7 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/network"
 	"github.com/stellar/go-stellar-sdk/strkey"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Defaults. These target the public testnet so that a fresh checkout can run
@@ -49,6 +49,8 @@ const (
 	DefaultWarnLedgers = 120_960
 	// DefaultCriticalLedgers is ~1 day at 5s per ledger.
 	DefaultCriticalLedgers = 17_280
+	// DefaultBaseFee is the network minimum base fee in stroops.
+	DefaultBaseFee = int64(100)
 )
 
 // Environment variable names.
@@ -65,6 +67,7 @@ const (
 	EnvConfigFile        = "SOROPROBE_CONFIG"
 	EnvProfile           = "SOROPROBE_PROFILE"
 	EnvSoroVaultURL      = "SOROVAULT_URL"
+	EnvBaseFee           = "BASE_FEE"
 )
 
 // Config holds every setting SoroProbe needs.
@@ -93,6 +96,8 @@ type Config struct {
 	// SoroVaultURL, when set, is a SoroVault registry whose recorded contract
 	// interfaces type simulate arguments. Empty disables the lookup.
 	SoroVaultURL string `json:"sorovault_url"`
+	// BaseFee is the base inclusion fee per operation in stroops.
+	BaseFee int64 `json:"base_fee"`
 }
 
 // Default returns a Config populated entirely from the package defaults.
@@ -106,6 +111,7 @@ func Default() Config {
 		Timeout:           DefaultTimeout,
 		WarnLedgers:       DefaultWarnLedgers,
 		CriticalLedgers:   DefaultCriticalLedgers,
+		BaseFee:           DefaultBaseFee,
 	}
 }
 
@@ -121,6 +127,7 @@ type fileConfig struct {
 	WarnLedgers       *uint32                `json:"warn_ledgers" yaml:"warn_ledgers"`
 	CriticalLedgers   *uint32                `json:"critical_ledgers" yaml:"critical_ledgers"`
 	SoroVaultURL      *string                `json:"sorovault_url" yaml:"sorovault_url"`
+	BaseFee           *int64                 `json:"base_fee" yaml:"base_fee"`
 	Profiles          map[string]*fileConfig `json:"profiles" yaml:"profiles"`
 }
 
@@ -217,6 +224,9 @@ func applyValues(cfg *Config, path string, fc *fileConfig) error {
 	if fc.CriticalLedgers != nil {
 		cfg.CriticalLedgers = *fc.CriticalLedgers
 	}
+	if fc.BaseFee != nil {
+		cfg.BaseFee = *fc.BaseFee
+	}
 	if fc.Timeout != nil {
 		d, err := time.ParseDuration(*fc.Timeout)
 		if err != nil {
@@ -227,12 +237,8 @@ func applyValues(cfg *Config, path string, fc *fileConfig) error {
 	return nil
 }
 
-func applyFile(cfg *Config, path string, required bool) error {
-	return applyFileWithProfile(cfg, path, required, "")
-}
-
 func applyFileWithProfile(cfg *Config, path string, required bool, profileName string) error {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // the config path comes from --config or SOROPROBE_CONFIG; reading it is the feature.
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) && !required {
 			if profileName != "" {
@@ -301,7 +307,23 @@ func applyEnv(cfg *Config) error {
 	if err := setUint32FromEnv(&cfg.WarnLedgers, EnvWarnLedgers); err != nil {
 		return err
 	}
-	return setUint32FromEnv(&cfg.CriticalLedgers, EnvCriticalLedgers)
+	if err := setUint32FromEnv(&cfg.CriticalLedgers, EnvCriticalLedgers); err != nil {
+		return err
+	}
+	return setInt64FromEnv(&cfg.BaseFee, EnvBaseFee)
+}
+
+func setInt64FromEnv(dst *int64, key string) error {
+	v := lookup(key)
+	if v == nil {
+		return nil
+	}
+	n, err := strconv.ParseInt(*v, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", key, err)
+	}
+	*dst = n
+	return nil
 }
 
 func setUint32FromEnv(dst *uint32, key string) error {

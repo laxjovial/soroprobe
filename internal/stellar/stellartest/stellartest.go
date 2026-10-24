@@ -42,6 +42,12 @@ const (
 	// ExtendFootprintTTL is the subject name of a transaction that extends
 	// the TTL of a ledger entry rather than invoking a contract function.
 	ExtendFootprintTTL = "extend_footprint_ttl"
+	// PersistentDataKey is the SAC balance entry recorded in
+	// ledger_entries_data_durability.json, stored with persistent durability.
+	PersistentDataKey = `vec:["sym:Balance","addr:CBXZBQ6NW3TGPGLTR4JCG2VPVWFLCCHKDW75NJIXYXV7CJLNUO64VTFC"]`
+	// TemporaryDataKey is the SAC allowance entry recorded in the same
+	// fixture, stored with temporary durability.
+	TemporaryDataKey = `vec:["sym:Allowance","map:[[\"sym:from\",\"addr:GB32JP5GNOQLW4NUMV6H2UBOSMB4DROL7YNDBWAHYXMVFLLJOH3LXKHK\"],[\"sym:spender\",\"addr:CA6P26K4QNNIMTYP22ILTSCXQQDEKNWJIZJPC34YEZYOLBNT7YUPX7XS\"]]"]`
 )
 
 // Load decodes a fixture file into v.
@@ -98,10 +104,23 @@ type Fake struct {
 	EntriesErr  error
 	LedgerErr   error
 
+	// HealthErr and NetworkErr inject getHealth and getNetwork failures.
+	HealthErr  error
+	NetworkErr error
+	// HealthStatus and NetworkPassphrase override what getHealth and
+	// getNetwork report. Empty keeps the default answer, so a Fake that
+	// leaves them alone behaves exactly as it always has.
+	HealthStatus      string
+	NetworkPassphrase string
+
 	// SimulateRequests and EntryRequests record what the code under test asked
 	// for, so tests can assert on the requests themselves.
 	SimulateRequests []protocol.SimulateTransactionRequest
 	EntryRequests    [][]string
+	// HealthRequests and NetworkRequests count readiness probes, so a test
+	// can assert that a cache kept them from multiplying.
+	HealthRequests  int
+	NetworkRequests int
 	// Functions records the decoded function name of each simulated call.
 	Functions []string
 }
@@ -140,6 +159,7 @@ func NewFake(t testing.TB) *Fake {
 
 	f.Simulations["decimals"] = LoadSimulate(t, "simulate_success.json")
 	f.Simulations["no_such_fn"] = LoadSimulate(t, "simulate_failure.json")
+	f.Simulations["transfer"] = LoadSimulate(t, "simulate_auth.json")
 	f.Simulations[ExtendFootprintTTL] = LoadSimulate(t, "simulate_extend.json")
 	return f
 }
@@ -199,12 +219,32 @@ func (f *Fake) GetLatestLedger(context.Context) (protocol.GetLatestLedgerRespons
 
 // GetNetwork implements stellar.Client.
 func (f *Fake) GetNetwork(context.Context) (protocol.GetNetworkResponse, error) {
-	return protocol.GetNetworkResponse{Passphrase: "Test SDF Network ; September 2015"}, nil
+	f.mu.Lock()
+	f.NetworkRequests++
+	f.mu.Unlock()
+	if f.NetworkErr != nil {
+		return protocol.GetNetworkResponse{}, f.NetworkErr
+	}
+	passphrase := f.NetworkPassphrase
+	if passphrase == "" {
+		passphrase = "Test SDF Network ; September 2015"
+	}
+	return protocol.GetNetworkResponse{Passphrase: passphrase}, nil
 }
 
 // GetHealth implements stellar.Client.
 func (f *Fake) GetHealth(context.Context) (protocol.GetHealthResponse, error) {
-	return protocol.GetHealthResponse{Status: "healthy", LatestLedger: f.LatestLedger}, nil
+	f.mu.Lock()
+	f.HealthRequests++
+	f.mu.Unlock()
+	if f.HealthErr != nil {
+		return protocol.GetHealthResponse{}, f.HealthErr
+	}
+	status := f.HealthStatus
+	if status == "" {
+		status = "healthy"
+	}
+	return protocol.GetHealthResponse{Status: status, LatestLedger: f.LatestLedger}, nil
 }
 
 // SetTTL overrides the liveUntilLedgerSeq of every stored entry belonging to a
