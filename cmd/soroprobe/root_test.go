@@ -169,6 +169,20 @@ func TestAllPersistentFlagsAreApplied(t *testing.T) {
 	assert.EqualValues(t, 99, cfg.CriticalLedgers)
 }
 
+func TestPerKindThresholdAndChainABIFlags(t *testing.T) {
+	cfg := resolveConfig(t, "simulate", "--data-warn-ledgers", "500", "--data-critical-ledgers", "25", "--abi-from-chain")
+	require.NotNil(t, cfg.ThresholdOverrides.Data)
+	assert.EqualValues(t, 500, *cfg.ThresholdOverrides.Data.Warn)
+	assert.EqualValues(t, 25, *cfg.ThresholdOverrides.Data.Critical)
+
+	cmd, opts := newRootCmd()
+	sub, rest, err := cmd.Find([]string{"simulate", "--abi-from-chain"})
+	require.NoError(t, err)
+	require.NoError(t, sub.ParseFlags(rest))
+	require.NoError(t, opts.resolve(sub))
+	assert.True(t, opts.abiFromChain)
+}
+
 func TestLogFormatDefaultsToText(t *testing.T) {
 	cfg := resolveConfig(t, "inspect")
 	assert.Equal(t, "text", cfg.LogFormat)
@@ -235,6 +249,57 @@ func TestVersionCommandNeedsNoConfig(t *testing.T) {
 
 	require.NoError(t, cmd.Execute())
 	assert.NotEmpty(t, out.String())
+}
+
+func TestProfileSelection(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "soroprobe.json")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{
+		"rpc_url": "https://default.example.com",
+		"network_passphrase": "Default Network",
+		"warn_ledgers": 100,
+		"critical_ledgers": 10,
+		"profiles": {
+			"mainnet": {
+				"rpc_url": "https://mainnet.example.com",
+				"network_passphrase": "Public Global Stellar Network ; September 2015",
+				"warn_ledgers": 200,
+				"critical_ledgers": 20
+			},
+			"testnet": {
+				"rpc_url": "https://testnet.example.com"
+			}
+		}
+	}`), 0o600))
+
+	t.Run("profile selected via flag", func(t *testing.T) {
+		cfg := resolveConfig(t, "inspect", "--config", cfgPath, "--profile", "mainnet")
+		assert.Equal(t, "https://mainnet.example.com", cfg.RPCURL)
+		assert.Equal(t, "Public Global Stellar Network ; September 2015", cfg.NetworkPassphrase)
+		assert.EqualValues(t, 200, cfg.WarnLedgers)
+	})
+
+	t.Run("profile selected via env", func(t *testing.T) {
+		t.Setenv(config.EnvProfile, "mainnet")
+		cfg := resolveConfig(t, "inspect", "--config", cfgPath)
+		assert.Equal(t, "https://mainnet.example.com", cfg.RPCURL)
+		assert.Equal(t, "Public Global Stellar Network ; September 2015", cfg.NetworkPassphrase)
+		assert.EqualValues(t, 200, cfg.WarnLedgers)
+	})
+
+	t.Run("flag profile overrides env profile", func(t *testing.T) {
+		t.Setenv(config.EnvProfile, "mainnet")
+		cfg := resolveConfig(t, "inspect", "--config", cfgPath, "--profile", "testnet")
+		assert.Equal(t, "https://testnet.example.com", cfg.RPCURL)
+		assert.Equal(t, "Default Network", cfg.NetworkPassphrase)
+	})
+
+	t.Run("unknown profile returns error with available profiles", func(t *testing.T) {
+		err := runWith(t, "inspect", "CDLZ", "--config", cfgPath, "--profile", "futurenet")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown profile "futurenet"`)
+		assert.Contains(t, err.Error(), "mainnet, testnet")
+	})
 }
 
 func TestCommandArgumentValidation(t *testing.T) {

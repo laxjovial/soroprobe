@@ -445,6 +445,8 @@ func (p *Prober) typeArgs(ctx context.Context, req SimulateRequest) (typedArgs, 
 		}
 		if errors.Is(err, abi.ErrUnknownContract) {
 			out.note = "contract not found in the interface registry; argument types were inferred"
+		} else if errors.Is(err, abi.ErrNoWasm) {
+			out.note = "stellar asset contract has no WASM interface; argument types were inferred"
 		} else {
 			out.note = "interface registry unavailable; argument types were inferred: " + err.Error()
 		}
@@ -488,6 +490,13 @@ func (p *Prober) buildSimulateResult(req SimulateRequest, resp protocol.Simulate
 		result.RestoreRequired = &RestoreInfo{
 			MinResourceFee:     resp.RestorePreamble.MinResourceFee,
 			TransactionDataXDR: resp.RestorePreamble.TransactionDataXDR,
+		}
+		var data xdr.SorobanTransactionData
+		if err := xdr.SafeUnmarshalBase64(resp.RestorePreamble.TransactionDataXDR, &data); err != nil {
+			return nil, fmt.Errorf("decode restore transaction data: %w", err)
+		}
+		for _, key := range data.Resources.Footprint.ReadWrite {
+			result.RestoreRequired.ArchivedEntries = append(result.RestoreRequired.ArchivedEntries, describeLedgerKey(key))
 		}
 	}
 

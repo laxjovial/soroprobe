@@ -210,12 +210,19 @@ days" means something very different for a temporary entry than a persistent one
 | `missing` | No such entry exists on the ledger |
 | `unknown` | Entry exists but reported no TTL |
 
-Thresholds are configurable with `--warn-ledgers` and `--critical-ledgers`.
+Global thresholds are configurable with `--warn-ledgers` and
+`--critical-ledgers`. Optional instance, code and data thresholds override
+those values independently; each kind accepts `warn` and `critical` values.
+For example, use `--data-warn-ledgers` or `DATA_WARN_LEDGERS`. The config file
+uses a `thresholds` object with `instance`, `code` and `data` objects, each
+containing optional `warn` and `critical` ledger counts. Reports include the
+effective thresholds applied to every entry.
 
-**A note on the time estimates.** SoroProbe converts ledgers to wall-clock time
-at the network's five-second target close time, which measured exactly 5.00s
-when verified. Real close times drift slightly, so treat the **ledger count as
-authoritative** and the duration as a convenience.
+**A note on the time estimates.** SoroProbe measures the average close time of
+the 20 most recent ledgers and uses it to convert ledger counts to wall-clock
+time. If RPC cannot provide that measurement, it falls back to the five-second
+target and says so in the report. Treat the **ledger count as authoritative**
+and the duration as a convenience.
 
 **Three things worth knowing:**
 
@@ -486,7 +493,7 @@ entries, and expired entries are dropped on read.
 
 ### Global flags
 
-`--json`, `--config`, `--rpc-url`, `--network-passphrase`, `--source-account`,
+`--json`, `--config`, `--profile`, `--rpc-url`, `--network-passphrase`, `--source-account`,
 `--log-level`, `--log-format`, `--timeout`, `--warn-ledgers`,
 `--critical-ledgers`, `--sorovault-url`.
 
@@ -768,7 +775,7 @@ clients are never told to cache it.
 
 ## Configuration
 
-Precedence, lowest to highest: **defaults → config file → environment → flags**.
+Precedence, lowest to highest: **defaults → top-level config file keys → profile → environment → flags**.
 
 | Environment variable | Flag | Default |
 | --- | --- | --- |
@@ -784,8 +791,16 @@ Precedence, lowest to highest: **defaults → config file → environment → fl
 | `INSPECT_CACHE_TTL` | `--inspect-cache-ttl` (on `serve`) | `0s` (off) |
 | `WARN_LEDGERS` | `--warn-ledgers` | `120960` (≈7 days) |
 | `CRITICAL_LEDGERS` | `--critical-ledgers` | `17280` (≈1 day) |
+| `INSTANCE_WARN_LEDGERS`, `INSTANCE_CRITICAL_LEDGERS` | `--instance-warn-ledgers`, `--instance-critical-ledgers` | global thresholds |
+| `CODE_WARN_LEDGERS`, `CODE_CRITICAL_LEDGERS` | `--code-warn-ledgers`, `--code-critical-ledgers` | global thresholds |
+| `DATA_WARN_LEDGERS`, `DATA_CRITICAL_LEDGERS` | `--data-warn-ledgers`, `--data-critical-ledgers` | global thresholds |
 | `SOROVAULT_URL` | `--sorovault-url` | unset — [type arguments from SoroVault](#typing-arguments-from-sorovault) |
 | `SOROPROBE_CONFIG` | `--config` | `./soroprobe.json` (then `./soroprobe.yaml`, `./soroprobe.yml`) if present |
+| `SOROPROBE_PROFILE` | `--profile` | unset |
+
+To type arguments from a contract's on-chain interface instead of SoroVault,
+pass `--abi-from-chain`. Stellar Asset Contracts have no Wasm interface and
+continue with inferred argument types, with a note in the result.
 
 Logs go to **stderr** in both formats, so redirecting stdout (or consuming
 `--json` output) never mixes a log line into the document being parsed.
@@ -803,6 +818,10 @@ docker run --env-file .env soroprobe check <contract>
 
 A config file, by contrast, is read directly. JSON and YAML formats (`soroprobe.json`, `soroprobe.yaml`, `soroprobe.yml`) are supported, with snake_case keys (unknown keys are rejected in both formats). When no path is specified, SoroProbe looks for `soroprobe.json`, then `soroprobe.yaml`, and finally `soroprobe.yml`.
 
+### Profiles
+
+Config files can define named `profiles` for different networks (such as `testnet`, `mainnet`, or `local`). Select a profile using `--profile <name>` or the `SOROPROBE_PROFILE` environment variable. An unknown profile name produces an error listing the available profiles.
+
 In JSON:
 
 ```json
@@ -810,7 +829,15 @@ In JSON:
   "rpc_url": "https://soroban-testnet.stellar.org",
   "warn_ledgers": 120960,
   "critical_ledgers": 17280,
-  "inspect_cache_ttl": "0s"
+  "inspect_cache_ttl": "0s",
+  "profiles": {
+    "mainnet": {
+      "rpc_url": "https://rpc.mainnet.stellar.org",
+      "network_passphrase": "Public Global Stellar Network ; September 2015",
+      "warn_ledgers": 172800,
+      "critical_ledgers": 34560
+    }
+  }
 }
 ```
 
@@ -821,6 +848,13 @@ Or in YAML:
 rpc_url: https://soroban-testnet.stellar.org
 warn_ledgers: 120960
 critical_ledgers: 17280
+
+profiles:
+  mainnet:
+    rpc_url: https://rpc.mainnet.stellar.org
+    network_passphrase: "Public Global Stellar Network ; September 2015"
+    warn_ledgers: 172800
+    critical_ledgers: 34560
 ```
 
 ## Why no secret key
